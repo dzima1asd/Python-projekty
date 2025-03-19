@@ -1,0 +1,54 @@
+[
+    {
+        "miasto": "\u015bwiebodzin",
+        "szeroko\u015b\u0107": 52.24751,
+        "d\u0142ugo\u015b\u0107": 15.53355,
+        "temperatura": 3.2
+    },
+    {
+        "miasto": "g\u0142og\u00f3w",
+        "szeroko\u015b\u0107": 51.66361,
+        "d\u0142ugo\u015b\u0107": 16.0845,
+        "temperatura": 4.4
+    },
+    {
+        "miasto": "swiebodzin",
+        "temperatura": 3.0
+    },
+    {
+        "miasto": "\u015bwiebodzin",
+        "temperatura": 3.0
+    },
+    {
+        "miasto": "glogow",
+        "temperatura": 2.6
+    },
+    {
+        "miasto": "glogow",
+        "temperatura": 2.6
+    },
+    {
+        "miasto": "\u015awiebodzin",
+        "temperatura": 3.0
+    },
+    {
+        "miasto": "swiebodzin",
+        "temperatura": 3.0
+    },
+    {
+        "miasto": "glogow",
+        "temperatura": 2.6
+    },
+    {
+        "miasto": "pozna",
+        "temperatura": 3.0
+    },
+    {
+        "miasto": "pozna\u0144",
+        "temperatura": 3.0
+    },
+    {
+        "miasto": "jelenia g\u00f3ra",
+        "temperatura": 2.0
+    }
+]

@@ -1,0 +1,2 @@
+#!/bin/bash
+python ~/gps_mgrs/gps_mgrs.py

@@ -1,0 +1,10 @@
+#!/bin/bash
+   # Ładujemy środowisko Termux
+   source $HOME/.bashrc
+
+   # Przekazujemy URL do skryptu Pythona
+   python ~/mgrs_conwerter.py "$1"
+
+   # Dodajemy pauzę, aby terminal się nie zamykał
+   echo "Naciśnij Enter, aby kontynuować..."
+   read

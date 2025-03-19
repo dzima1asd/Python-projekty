@@ -1,0 +1,14 @@
+Cython==0.29.36
+geographiclib==2.0
+keyboard==0.13.5
+packaging==24.2
+paho-mqtt==2.1.0
+PyAudio==0.2.14
+pyfiglet==1.0.2
+setuptools==75.8.0
+SpeechRecognition==3.12.0
+termux==1.0.0
+termux-api==1.2.5.3
+typing_extensions==4.12.2
+utm==0.8.0
+wheel==0.45.1
