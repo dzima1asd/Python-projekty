@@ -559,21 +559,20 @@ def main():
 
             user_input = input("hal@ai-term:~$ ").strip()
 
-         # Obsługa komendy help
-        if user_input.lower() == "help":
-            print("📖 Dostępne polecenia:")
-            print("  exit                      – zakończenie działania")
-            print("  read <plik>              – odczyt pliku")
-            print("  write <plik> <treść>     – zapis do pliku")
-            print("  !<komenda>               – wykonanie komendy systemowej")
-            print("  dowolne polecenie        – przekaż AI")
+             # Obsługa komendy help
+            if user_input.lower() == "help":
+                print("📖 Dostępne polecenia:")
+                print("  exit                      – zakończenie działania")
+                print("  read <plik>              – odczyt pliku")
+                print("  write <plik> <treść>     – zapis do pliku")
+                print("  !<komenda>               – wykonanie komendy systemowej")
+                print("  dowolne polecenie        – przekaż AI")
             continue
 
-        # Obsługa komendy exit
-        if user_input.lower() == "exit":
-            print("👋 Do zobaczenia, Jaśnie Panie!")
-        break
-
+            # Obsługa komendy exit
+            if user_input.lower() == "exit":
+                print("👋 Do zobaczenia, Jaśnie Panie!")
+            break
 
             # Sprawdź, czy pasuje do polecenia urządzenia
             komendy_urządzeń = załaduj_komendy_urządzeń()
