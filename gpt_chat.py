@@ -10,61 +10,37 @@ from pathlib import Path
 import psutil
 import requests
 import getpass
-from openai import OpenAI
-from history_manager import HistoryManager
 from collections import deque
-from command_mapper import CommandMapper
+from openai import OpenAI
+import difflib
+import os
 
-def get_prompt(history, user_input, system_prompt="Jesteś AI terminalem, odpowiadasz w stylu basha."):
-    max_tokens = 2500
-    current_prompt = [{"role": "system", "content": system_prompt}]
-    token_sum = len(system_prompt.split())
-
-    for entry in reversed(history.entries):
-        tokens = len(entry["content"].split())
-        if token_sum + tokens > max_tokens:
-            break
-        current_prompt.insert(1, entry)
-        token_sum += tokens
-
-    current_prompt.append({"role": "user", "content": user_input})
-    return current_prompt
+if not os.getenv("OPENAI_API_KEY"):
+    print("🔐 Nie wykryto klucza OpenAI API.")
+    key = input("Podaj swój klucz OpenAI API: ").strip()
+    os.environ["OPENAI_API_KEY"] = key
+    print("✅ Klucz zapisany w zmiennej środowiskowej.")
 
 
-class HistoryManager:
-    def __init__(self, history_file="history.jsonl", max_entries=50):
-        self.history_file = history_file
-        self.max_entries = max_entries
-        self.entries = deque(maxlen=max_entries)
-        self._load_history()
 
-    def _load_history(self):
-        if os.path.exists(self.history_file):
-            with open(self.history_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    try:
-                        self.entries.append(json.loads(line.strip()))
-                    except json.JSONDecodeError:
-                        continue
-
-    def add_entry(self, role: str, content: str):
-        entry = {"role": role, "content": content}
-        self.entries.append(entry)
-        with open(self.history_file, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
-
-    def get_recent_history(self):
-        return list(self.entries)
+def auto_update():
+    try:
+        url = "https://raw.githubusercontent.com/dzima1asd/Python-projekty/main/gpt_chat.py"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200 and "def main():" in response.text:
+            current_code = Path(__file__).read_text(encoding="utf-8")
+            if response.text.strip() != current_code.strip():
+                Path(__file__).write_text(response.text, encoding="utf-8")
+                print("✅ Terminal zaktualizowany. Uruchom ponownie.")
+                exit(0)
+        else:
+            print("⚠️ Brak aktualizacji lub nieprawidłowa zawartość (HTTP", response.status_code, ")")
+    except Exception as e:
+        print(f"❌ Autoaktualizacja nie powiodła się: {e}")
 
 
-    def show_recent(self, n=5):
-        """Wyświetla ostatnie n wpisów z historii"""
-        for entry in list(self.entries)[-n:]:
-            print(f"[{entry.get('timestamp')}] {entry.get('role', 'unknown').upper()}: {entry.get('content')}")
-
-
+# === Config ===
 class Config:
-    """Klasa konfiguracyjna z domyślnymi ustawieniami"""
     def __init__(self):
         self.LOG_FILE = "command_log.json"
         self.SAFETY_MODE = True
@@ -73,57 +49,38 @@ class Config:
         self.ENABLE_FILE_OPS = True
         self.ENABLE_NETWORK_OPS = False
         self.ALLOWED_DIRS = [str(Path.home())]
-        self.BLACKLISTED_DIRS = ["/", "/etc", "/bin", "/sbin", "/usr"]
+        self.BLACKLISTED_DIRS = ["/etc", "/bin", "/sbin", "/usr"]
         self.MEMORY_FILE = "session_memory.json"
         self.OPENAI_MODEL = "gpt-4"
         self.COMMAND_PREFIX = "!"
 
+# === System Inspector ===
 class SystemInspector:
-    """Klasa do inspekcji systemu i dostarczania informacji do AI"""
     @staticmethod
     def get_system_info() -> Dict:
-        """Zbiera kompleksowe informacje o systemie"""
         try:
             mem = psutil.virtual_memory()
             disk = psutil.disk_usage('/')
-
-            info = {
+            return {
                 "system": platform.system(),
                 "release": platform.release(),
                 "machine": platform.machine(),
                 "processor": platform.processor(),
                 "cpu_cores": os.cpu_count(),
-                "memory": {
-                    "total": mem.total,
-                    "available": mem.available,
-                    "percent": mem.percent
-                },
-                "disk_usage": {
-                    "total": disk.total,
-                    "used": disk.used,
-                    "free": disk.free,
-                    "percent": disk.percent
-                },
+                "memory": {"total": mem.total, "available": mem.available, "percent": mem.percent},
+                "disk_usage": {"total": disk.total, "used": disk.used, "free": disk.free, "percent": disk.percent},
                 "current_user": getpass.getuser(),
-                "environment": {
-                    k: v for k, v in os.environ.items()
-                    if not any(s in k.lower() for s in ["key", "pass", "token"])
-                },
-                "network": {
-                    "hostname": platform.node(),
-                    "ip_address": SystemInspector.get_ip_address(),
-                },
+                "hostname": platform.node(),
+                "ip_address": SystemInspector.get_ip_address(),
+                "environment": {k: v for k, v in os.environ.items() if not any(s in k.lower() for s in ["key", "pass", "token"])},
                 "python_version": platform.python_version(),
                 "timestamp": datetime.now().isoformat()
             }
-            return info
         except Exception as e:
-            print(f"Błąd podczas zbierania informacji o systemie: {e}")
-            return {}
+            return {"error": str(e)}
 
     @staticmethod
     def get_ip_address() -> str:
-        """Pobiera zewnętrzny adres IP"""
         try:
             return requests.get('https://api.ipify.org', timeout=3).text
         except:
@@ -132,10 +89,58 @@ class SystemInspector:
             except:
                 return "127.0.0.1"
 
-class CommandValidator:
-    """Klasa do walidacji i bezpieczeństwa komend"""
+# === Session Memory ===
+class SessionMemory:
     def __init__(self, config: Config):
         self.config = config
+        self.memory_file = self.config.MEMORY_FILE
+        self.data: Dict[str, str] = {}
+        self.load()
+
+    def load(self):
+        if os.path.isfile(self.memory_file):
+            try:
+                with open(self.memory_file, "r") as f:
+                    self.data = json.load(f)
+            except Exception:
+                self.data = {}
+
+    def save(self):
+        try:
+            with open(self.memory_file, "w") as f:
+                json.dump(self.data, f, indent=2)
+        except Exception as e:
+            print(f"Błąd zapisu pamięci sesji: {e}")
+
+    def set(self, key: str, value: str):
+        self.data[key] = value
+        self.save()
+
+    def get(self, key: str) -> Optional[str]:
+        return self.data.get(key)
+
+    def clear(self):
+        self.data = {}
+        self.save()
+
+class CommandValidator:
+    """Klasa do walidacji i bezpieczeństwa komend"""
+
+    def __init__(self, config: Config):
+        self.config = config
+        self.dangerous_patterns = [
+            (r'rm\s+-rf\s+/', "Rekursywne usuwanie roota"),
+            (r'(shutdown|reboot|poweroff|halt)', "Wyłączanie systemu"),
+            (r'systemctl\s+(stop|disable)\s+', "Zatrzymywanie usług"),
+            (r'(ifconfig|ip)\s+\w+\s+down', "Wyłączanie interfejsów"),
+            (r'iptables\s+-F', "Czyszczenie firewall"),
+            (r'mkfs\s+', "Formatowanie"),
+            (r'chmod\s+[0]\s+/etc/(passwd|shadow|sudoers)', "Niebezpieczne uprawnienia"),
+            (r'echo\s+.+\s+>\s+/etc/', "Nadpisywanie systemowych plików"),
+            (r':(){:|:&};', "Fork bomb"),
+            (r'nc\s+-l', "Otwieranie portów"),
+            (r'ssh\s+-[fNR]', "Niebezpieczne opcje SSH"),
+        ]
         self.warning_patterns = [
             (r'rm\s', "Usuwanie plików"),
             (r'apt\s+(install|remove|purge)', "Zarządzanie pakietami"),
@@ -148,22 +153,6 @@ class CommandValidator:
             (r'wget\s+\S+', "Pobieranie plików"),
         ]
 
-        self.dangerous_patterns = [
-            (r'rm\s+-rf\s+\/', "Rekursywne usuwanie roota"),
-            (r'(shutdown|reboot|poweroff|halt)', "Wyłączanie systemu"),
-            (r'systemctl\s+(stop|disable)\s+', "Zatrzymywanie usług"),
-            (r'(ifconfig|ip)\s+\w+\s+down', "Wyłączanie interfejsów"),
-            (r'iptables\s+-F', "Czyszczenie firewall"),
-            (r'm[v]\s+\/(etc|usr|bin|lib|sbin|var|boot)', "Przenoszenie systemowych katalogów"),
-            (r'dd\s+if=\S+\s+of=\S+', "Operacje dd"),
-            (r'mkfs\s+', "Formatowanie"),
-            (r'chmod\s+[0]\s+\/etc\/(passwd|shadow|sudoers)', "Niebezpieczne uprawnienia"),
-            (r'echo\s+\S+\s+>\s+\/(etc|usr|bin|lib|sbin|var|boot)', "Nadpisywanie systemowych plików"),
-            (r':(){:|:&\};?', "Fork bomb"),
-            (r'nc\s+-l', "Otwieranie portów"),
-            (r'ssh\s+-[fNR]', "Niebezpieczne opcje SSH"),
-        ]
-
     def validate_command(self, command: str) -> Tuple[bool, Optional[str]]:
         """Kompleksowa walidacja komendy pod kątem bezpieczeństwa"""
         if not self.config.SAFETY_MODE:
@@ -171,68 +160,98 @@ class CommandValidator:
 
         command_lower = command.lower()
 
-        if any(dir in command_lower for dir in self.config.BLACKLISTED_DIRS):
-            return False, "Operacja na zabronionym katalogu"
+        # Sprawdzenie, czy argumenty komendy wskazują na zabroniony katalog
+        for blocked in self.config.BLACKLISTED_DIRS:
+            matches = re.findall(r'[\s\'"](/[^\'"\s]+)', command_lower)
+            for path in matches:
+                if path.startswith(blocked):
+                    return False, f"Zabroniona ścieżka: {blocked}"
 
+        # Wzorce niebezpieczne
         for pattern, description in self.dangerous_patterns:
             if re.search(pattern, command_lower):
                 return False, f"Niebezpieczna operacja: {description}"
 
+        # Wzorce ostrzegawcze
         for pattern, description in self.warning_patterns:
             if re.search(pattern, command_lower):
                 return True, f"Wymaga potwierdzenia: {description}"
 
         return True, None
 
+# === File Operations ===
+class FileOperations:
+    def __init__(self, config: Config):
+        self.config = config
+
+    def _is_safe(self, path: str) -> bool:
+        abs_path = os.path.abspath(path)
+        return any(abs_path.startswith(allowed) for allowed in self.config.ALLOWED_DIRS) and \
+               not any(abs_path.startswith(blocked) for blocked in self.config.BLACKLISTED_DIRS)
+
+
+    def read_file(self, path: str) -> Optional[str]:
+        if not self._is_safe(path):
+            return None
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except:
+            return None
+
+    def write_file(self, path: str, content: str) -> bool:
+        if not self._is_safe(path):
+            return False
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            return True
+        except:
+            return False
+
+    def append_to_file(self, path: str, content: str) -> bool:
+        if not self._is_safe(path):
+            return False
+        try:
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(content)
+            return True
+        except:
+            return False
+
+    def delete_file(self, path: str) -> bool:
+        if not self._is_safe(path):
+            return False
+        try:
+            os.remove(path)
+            return True
+        except:
+            return False
+
+# === Command Executor ===
+
 class CommandExecutor:
-    """Rozszerzona klasa do wykonywania komend z dodatkowymi funkcjami"""
     def __init__(self, config: Config, inspector: SystemInspector):
         self.config = config
         self.inspector = inspector
 
     def execute(self, command: str) -> Tuple[bool, str]:
-        """Bezpieczne wykonanie komendy z pełnym logowaniem"""
+        """Wykonuje komendę systemową z logowaniem i obsługą wyjątków"""
         try:
             result = subprocess.run(
                 command,
                 shell=True,
-                check=True,
+                check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 timeout=60
             )
-            self.log_command("WYKONANO", command, result.stdout)
-            return True, result.stdout
-        except subprocess.CalledProcessError as e:
-            self.log_command("BŁĄD", command, e.stderr)
-            return False, e.stderr
+            status = "WYKONANO" if result.returncode == 0 else "BŁĄD"
+            output = result.stdout if result.returncode == 0 else result.stderr
+            self.log_command(status, command, output)
+            return result.returncode == 0, output
         except subprocess.TimeoutExpired:
-            self.log_command("TIMEOUT", command, "Przekroczono czas wykonania")
-            return False, "Przekroczono czas wykonania komendy"
-        except Exception as e:
-            self.log_command("BŁĄD", command, str(e))
-            return False, str(e)
-
-    def execute_with_pipe(self, command: str) -> Tuple[bool, str]:
-        """Wykonanie komendy z potokowaniem"""
-        try:
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            stdout, stderr = process.communicate(timeout=60)
-            if process.returncode == 0:
-                self.log_command("WYKONANO", command, stdout)
-                return True, stdout
-            else:
-                self.log_command("BŁĄD", command, stderr)
-                return False, stderr
-        except subprocess.TimeoutExpired:
-            process.kill()
             self.log_command("TIMEOUT", command, "Przekroczono czas wykonania")
             return False, "Przekroczono czas wykonania komendy"
         except Exception as e:
@@ -240,157 +259,21 @@ class CommandExecutor:
             return False, str(e)
 
     def log_command(self, status: str, command: str, output: str = ""):
-        """Loguje wykonanie komendy z jej statusem i ewentualnym wynikiem"""
         print(f"[{status}] {command}")
         if output:
             print(output)
 
-class FileOperations:
-    """Bezpieczne operacje na plikach z kontrolą dostępu"""
-    def __init__(self, config: Config):
-        self.config = config
-
-    def is_allowed_path(self, path: str) -> bool:
-        """Sprawdza czy ścieżka jest dozwolona"""
-        try:
-            abs_path = os.path.abspath(path)
-            return any(abs_path.startswith(allowed) for allowed in self.config.ALLOWED_DIRS) and \
-                   not any(abs_path.startswith(blocked) for blocked in self.config.BLACKLISTED_DIRS)
-        except Exception:
-            return False
-
-    def read_file(self, file_path: str) -> Optional[str]:
-        """Bezpieczne czytanie pliku z walidacją ścieżki"""
-        if not self.config.ENABLE_FILE_OPS or not self.is_allowed_path(file_path):
-            return None
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except Exception:
-            return None
-
-    def write_file(self, file_path: str, content: str) -> bool:
-        """Bezpieczne zapisywanie pliku"""
-        if not self.config.ENABLE_FILE_OPS or not self.is_allowed_path(file_path):
-            return False
-        try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-            return True
-        except Exception:
-            return False
-
-    def append_to_file(self, file_path: str, content: str) -> bool:
-        """Dopisuje zawartość do pliku"""
-        if not self.config.ENABLE_FILE_OPS or not self.is_allowed_path(file_path):
-            return False
-        try:
-            with open(file_path, 'a', encoding='utf-8') as f:
-                f.write(content)
-            return True
-        except Exception:
-            return False
-
-    def delete_file(self, file_path: str) -> bool:
-        """Bezpieczne usuwanie pliku"""
-        if not self.config.ENABLE_FILE_OPS or not self.is_allowed_path(file_path):
-            return False
-        try:
-            os.remove(file_path)
-            return True
-        except Exception:
-            return False
-
-class CommandHistory:
-    """Zarządzanie historią komend z limitem i zapisem do pliku"""
-    def __init__(self, config: Config):
-        self.config = config
-        self.file_path = self.config.LOG_FILE
-        self.history: List[Dict] = []
-        self.load()
-
-    def load(self):
-        """Ładuje historię z pliku"""
-        if os.path.isfile(self.file_path):
-            try:
-                with open(self.file_path, "r") as f:
-                    self.history = json.load(f)
-            except Exception:
-                self.history = []
-
-    def save(self):
-        """Zapisuje historię do pliku"""
-        try:
-            with open(self.file_path, "w") as f:
-                json.dump(self.history[-self.config.MAX_HISTORY:], f, indent=2)
-        except Exception as e:
-            print(f"Błąd zapisu historii: {e}")
-
-    def add(self, command: str, result: str, status: str):
-        """Dodaje nową komendę do historii"""
-        self.history.append({
-            "timestamp": datetime.now().isoformat(),
-            "command": command,
-            "status": status,
-            "result": result.strip()[:500]
-        })
-        self.save()
-
-    def get_recent(self, count: int = 10) -> List[Dict]:
-        """Zwraca ostatnie komendy"""
-        return self.history[-count:]
-
-class SessionMemory:
-    """Zarządzanie pamięcią sesji między interakcjami"""
-    def __init__(self, config: Config):
-        self.config = config
-        self.memory_file = self.config.MEMORY_FILE
-        self.data: Dict[str, str] = {}
-        self.load()
-
-    def load(self):
-        """Ładuje dane z pliku"""
-        if os.path.isfile(self.memory_file):
-            try:
-                with open(self.memory_file, "r") as f:
-                    self.data = json.load(f)
-            except Exception:
-                self.data = {}
-
-    def save(self):
-        """Zapisuje dane do pliku"""
-        try:
-            with open(self.memory_file, "w") as f:
-                json.dump(self.data, f, indent=2)
-        except Exception as e:
-            print(f"Błąd zapisu pamięci sesji: {e}")
-
-    def set(self, key: str, value: str):
-        """Ustawia wartość kontekstową"""
-        self.data[key] = value
-        self.save()
-
-    def get(self, key: str) -> Optional[str]:
-        """Pobiera wartość kontekstową"""
-        return self.data.get(key)
-
-    def clear(self):
-        """Czyści całą pamięć"""
-        self.data = {}
-        self.save()
-
+# === AITerminal ===
 class AITerminal:
-    """Główna klasa terminala AI z zarządzaniem sesją"""
-    def __init__(self, config: Config, executor: CommandExecutor, file_ops: FileOperations):
+    def __init__(self, config: Config, executor, file_ops):
         self.config = config
         self.executor = executor
         self.file_ops = file_ops
-        self.history = self._load_history()
+        self.history: List[Dict] = self._load_history()
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.system_info = SystemInspector().get_system_info()
+        self.system_info = SystemInspector.get_system_info()
 
     def add_to_history(self, command: str, output: str):
-        """Dodaje wpis do historii i zapisuje do pliku"""
         self.history.append({
             "command": command,
             "output": output,
@@ -399,8 +282,23 @@ class AITerminal:
         self.history = self.history[-self.config.MAX_HISTORY:]
         self._save_history()
 
+    def _save_history(self):
+        try:
+            with open(self.config.MEMORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Błąd podczas zapisywania historii: {e}")
+
+    def _load_history(self) -> List[Dict]:
+        try:
+            if os.path.exists(self.config.MEMORY_FILE):
+                with open(self.config.MEMORY_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return []
+
     def get_context_prompt(self) -> str:
-        """Generuje rozbudowany prompt kontekstowy dla AI"""
         context = [
             "Jesteś inteligentnym asystentem terminalowym. Masz następujące informacje o systemie:",
             f"System: {self.system_info.get('system', 'N/A')} {self.system_info.get('release', 'N/A')}",
@@ -410,7 +308,6 @@ class AITerminal:
             f"Katalog domowy: {os.path.expanduser('~')}",
             "\nOstatnie komendy:"
         ]
-
         for item in self.history[-5:]:
             context.append(f"- {item['command']} (output: {item['output'][:50]}...)")
         context.append("\nFormat odpowiedzi:")
@@ -420,7 +317,6 @@ class AITerminal:
         return "\n".join(context)
 
     def query_ai(self, prompt: str) -> str:
-        """Wysyła zapytanie do AI i przetwarza odpowiedź"""
         try:
             response = self.client.chat.completions.create(
                 model=self.config.OPENAI_MODEL,
@@ -436,7 +332,6 @@ class AITerminal:
             return f"Błąd zapytania do OpenAI: {str(e)}"
 
     def translate_natural_command(self, text: str) -> Optional[str]:
-        """Tłumaczy naturalne polecenia na komendy systemowe"""
         text = text.lower()
         if "zawartość katalogu" in text or "co jest w katalogu" in text or "pokaż katalog" in text:
             return "ls"
@@ -446,160 +341,314 @@ class AITerminal:
             plik = text.split("plik ", 1)[1].strip()
             return f"cat {plik}"
         if text.startswith("stwórz plik ") or text.startswith("utwórz plik "):
-            m = re.match(r'(stwórz|utwórz) plik (\S+)( i zapisz w nim (.+))?', text)
+            m = re.match(r'(stwórz|utwórz) plik (\\S+)( i zapisz w nim (.+))?', text)
             if m:
                 nazwa = m.group(2)
                 tresc = m.group(4)
                 if tresc:
-                    return f'echo "{tresc}" > {nazwa}'
+                    return f'echo \"{tresc}\" > {nazwa}'
                 else:
                     return f'touch {nazwa}'
         return None
 
-    def _save_history(self):
-        """Zapisuje historię do pliku JSON"""
-        try:
-            with open(self.config.MEMORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.history, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Błąd podczas zapisywania historii: {e}")
-
-    def _load_history(self) -> List[Dict]:
-        """Wczytuje historię z pliku JSON"""
-        try:
-            if os.path.exists(self.config.MEMORY_FILE):
-                with open(self.config.MEMORY_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except Exception:
-            pass
-        return []
-
     @staticmethod
     def _format_bytes(size: int) -> str:
-        """Formatuje bajty do czytelnej postaci"""
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
             if size < 1024.0:
                 return f"{size:.1f} {unit}"
             size /= 1024.0
         return f"{size:.1f} PB"
 
-history = HistoryManager("history.jsonl", max_entries=50)
+# --- AI Response Handler: WYKONAJ ---
+def parse_and_execute_ai_response(response: str, config, validator, executor, terminal):
+    lines = response.strip().splitlines()
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.lower().startswith("wykonaj:"):
+            command = stripped[8:].strip()
+            print(f"➡️ AI sugeruje wykonanie: {command}")
+            confirm = input("Czy wykonać? [Y/n]: ").strip().lower()
+            if confirm not in ["", "y", "yes", "tak"]:
+                print("❌ Anulowano wykonanie.")
+                return
+
+            valid, msg = validator.validate_command(command)
+            if not valid:
+                print(f"🔚 Blokada bezpieczeństwa: {msg}")
+                return
+            if msg:
+                print(f"⚠️ Ostrzeżenie: {msg}")
+
+            success, output = executor.execute(command)
+            print(output)
+            terminal.add_to_history(command, output)
+            return
+
+#--- AI Response Handler: File Operations ---
+
+def handle_file_operations(response: str, file_ops, terminal):
+    lines = response.strip().splitlines()
+    for line in lines:
+        stripped = line.strip()
+
+        # PLIK: przeczytaj <plik>
+        if "plik" in stripped.lower() and "przeczytaj" in stripped.lower():
+            match = re.search(r'przeczytaj\s+plik\s+(\S+)', stripped, re.IGNORECASE)
+            if match:
+                path = match.group(1)
+                content = file_ops.read_file(path)
+                if content:
+                    print(content)
+                    terminal.add_to_history(f"read {path}", content[:200])
+                else:
+                    print("❌ Nie udało się odczytać pliku")
+                return
+
+        # PLIK: zapisz <plik> zawiera <treść>
+        if "plik" in stripped.lower() and "zapisz" in stripped.lower():
+            match = re.search(r'zapisz\s+plik\s+(\S+)\s+zawiera\s+(.+)', stripped, re.IGNORECASE)
+            if match:
+                path, content = match.group(1), match.group(2)
+                if file_ops.write_file(path, content):
+                    print("✅ Zapisano plik")
+                    terminal.add_to_history(f"write {path}", content)
+                else:
+                    print("❌ Błąd zapisu pliku")
+                return
+
+# PLIK: przeczytaj <plik>
+    if "plik" in stripped.lower() and "przeczytaj" in stripped.lower():
+        match = re.search(r'przeczytaj\s+plik\s+(\S+)', stripped, re.IGNORECASE)
+        if match:
+            path = match.group(1)
+            content = file_ops.read_file(path)
+            if content:
+                print(content)
+                terminal.add_to_history(f"read {path}", content[:200])
+            else:
+                print("\u274c Nie uda\u0142o si\u0119 odczyta\u0107 pliku")
+            return
+
+    # PLIK: zapisz <plik> zawiera <tre\u015b\u0107>
+    if "plik" in stripped.lower() and "zapisz" in stripped.lower():
+        match = re.search(r'zapisz\s+plik\s+(\S+)\s+zawiera\s+(.+)', stripped, re.IGNORECASE)
+        if match:
+            path, content = match.group(1), match.group(2)
+            if file_ops.write_file(path, content):
+                print("\u2705 Zapisano plik")
+                terminal.add_to_history(f"write {path}", content)
+            else:
+                print("\u274c B\u0142\u0105d zapisu pliku")
+            return
+
+# --- AI Response Handler: Wykonaj Komendę ---
+def parse_and_execute_ai_response(response: str, config, validator, executor, terminal):
+    lines = response.strip().splitlines()
+    for line in lines:
+        stripped = line.strip()
+
+        # Sprawdź, czy AI sugeruje wykonanie komendy
+        if stripped.lower().startswith("wykonaj:"):
+            command = stripped[8:].strip()
+            print(f"➡️ AI sugeruje wykonanie: {command}")
+            confirm = input("Czy wykonać? [Y/n]: ").strip().lower()
+            if confirm not in ["", "y", "yes", "tak"]:
+                print("❌ Anulowano wykonanie.")
+                return
+
+            valid, msg = validator.validate_command(command)
+            if not valid:
+                print(f"🛑 Blokada bezpieczeństwa: {msg}")
+                return
+            if msg:
+                print(f"⚠️ Ostrzeżenie: {msg}")
+            success, output = executor.execute(command)
+            print(output)
+            terminal.add_to_history(command, output)
+            return
+
+# Sprawdź, czy AI sugeruje wykonanie komendy
+    if stripped.lower().startswith("wykonaj:"):
+        command = stripped[8:].strip()
+        print(f"➡️ AI sugeruje wykonanie: {command}")
+        confirm = input("Czy wykona\u0107? [Y/n]: ").strip().lower()
+        if confirm not in ["", "y", "yes", "tak"]:
+            print("\u274c Anulowano wykonanie.")
+            return
+
+        valid, msg = validator.validate_command(command)
+        if not valid:
+            print(f"🔚 Blokada bezpiecze\u0144stwa: {msg}")
+            return
+        if msg:
+            print(f"⚠️ Ostrze\u017cenie: {msg}")
+        success, output = executor.execute(command)
+        print(output)
+        terminal.add_to_history(command, output)
+        return
+
+def załaduj_komendy_urządzeń(plik: str = "device_commands.json") -> dict:
+    """Wczytuje plik z komendami dla urządzeń, np. przekaźników, LED itp."""
+    try:
+        with open(plik, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Nie udało się załadować komend urządzeń: {e}")
+        return {}
+
+def interpretuj_polecenie_urządzenia(tekst: str, komendy: dict) -> Optional[str]:
+    """Analizuje polecenie tekstowe i próbuje dopasować do komend urządzeń"""
+    tekst = tekst.lower()
+    for urządzenie, akcje in komendy.items():
+        if urządzenie in tekst:
+            if "włącz" in tekst:
+                return akcje.get("włącz")
+            if "wyłącz" in tekst or "zgaś" in tekst:
+                return akcje.get("wyłącz")
+    return None
+
+def załaduj_komendy_urządzeń(plik="device_commands.json"):
+    try:
+        with open(plik, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"❌ Błąd ładowania komend urządzeń: {e}")
+        return {}
+
+def interpretuj_polecenie_urządzenia(tekst: str, komendy: dict):
+    tekst = tekst.lower()
+    nazwy_urzadzen = list(komendy.keys())
+
+    # Bezpośrednie dopasowanie
+    for urządzenie in nazwy_urzadzen:
+        if urządzenie in tekst or any(słowo in tekst for słowo in urządzenie.split()):
+            if "włącz" in tekst:
+                return komendy[urządzenie].get("włącz")
+            elif any(słowo in tekst for słowo in ["wyłącz", "zgaś", "zgasz", "wyłączyć"]):
+                return komendy[urządzenie].get("wyłącz")
+
+    # Fuzzy matching
+    pasujace = difflib.get_close_matches(tekst, nazwy_urzadzen, n=1, cutoff=0.4)
+    if pasujace:
+        urządzenie = pasujace[0]
+        if "włącz" in tekst:
+            return komendy[urządzenie].get("włącz")
+        elif any(słowo in tekst for słowo in ["wyłącz", "zgaś", "zgasz", "wyłączyć"]):
+            return komendy[urządzenie].get("wyłącz")
+
+    return None
+
+# === Main Loop ===
 
 def main():
-    """Główna funkcja uruchamiająca terminal AI"""
     config = Config()
     inspector = SystemInspector()
     validator = CommandValidator(config)
     executor = CommandExecutor(config, inspector)
     file_ops = FileOperations(config)
-    history = HistoryManager()
     terminal = AITerminal(config, executor, file_ops)
 
-    terminal = AITerminal(config, executor, file_ops)
-
-    print("🌐 GPT TERMINAL v2.0")
-    print("Wpisz '!komenda' aby wykonać polecenie systemowe")
-    print("Wpisz 'read <plik>' aby odczytać plik")
-    print("Wpisz 'write <plik> <treść>' aby zapisać do pliku")
-    print("Wpisz dowolny tekst aby pogadać z AI")
-    print("Wpisz 'exit' aby zakończyć\n")
-
-
-def main():
-    """Główna funkcja uruchamiająca terminal AI"""
-    # Inicjalizacja wszystkich potrzebnych komponentów
-    config = Config()
-    inspector = SystemInspector()
-    validator = CommandValidator(config)
-    executor = CommandExecutor(config, inspector)
-    file_ops = FileOperations(config)
-    history = HistoryManager()
-
-    # Inicjalizacja terminala
-    terminal = AITerminal(config, executor, file_ops)
-
-    print("🌐 GPT TERMINAL v2.0")
-    print("Wpisz '!komenda' aby wykonać polecenie systemowe")
-    print("Wpisz 'read <plik>' aby odczytać plik")
-    print("Wpisz 'write <plik> <treść>' aby zapisać do pliku")
-    print("Wpisz dowolny tekst aby pogadać z AI")
-    print("Wpisz 'exit' aby zakończyć\n")
+    print("🌐 GPT TERMINAL FUSION – wpisz 'exit' aby zakończyć")
+    print("📁 read <plik> – odczyt pliku")
+    print("✏️ write <plik> <treść> – zapis do pliku")
+    print("📡 !komenda – wykonanie polecenia systemowego ")
 
     while True:
         try:
+
             user_input = input("hal@ai-term:~$ ").strip()
 
-            # Zapis inputu użytkownika
-            history.add_entry("user", user_input)
+         # Obsługa komendy help
+        if user_input.lower() == "help":
+            print("📖 Dostępne polecenia:")
+            print("  exit                      – zakończenie działania")
+            print("  read <plik>              – odczyt pliku")
+            print("  write <plik> <treść>     – zapis do pliku")
+            print("  !<komenda>               – wykonanie komendy systemowej")
+            print("  dowolne polecenie        – przekaż AI")
+            continue
 
-            # Obsługa komendy exit
-            if user_input.lower() == 'exit':
-                break
+        # Obsługa komendy exit
+        if user_input.lower() == "exit":
+            print("👋 Do zobaczenia, Jaśnie Panie!")
+        break
 
-            # Interpretacja poleceń naturalnych
-            natural_cmd = terminal.translate_natural_command(user_input)
-            if natural_cmd:
-                print(f"Wykonuję: {natural_cmd}")
-                history.add_entry("assistant", f"Tłumaczę na: {natural_cmd}")
-                user_input = natural_cmd
 
-            # Obsługa komend systemowych
-            if user_input.startswith(config.COMMAND_PREFIX):
-                cmd = user_input[1:]
-                is_valid, reason = validator.validate_command(cmd)
-
-                if not is_valid:
-                    print(f"🛑 {reason}")
-                    history.add_entry("system", f"Zablokowano komendę: {reason}")
-                    continue
-
-                success, output = executor.execute(cmd)
-                if success:
+            # Sprawdź, czy pasuje do polecenia urządzenia
+            komendy_urządzeń = załaduj_komendy_urządzeń()
+            komenda_z_urz = interpretuj_polecenie_urządzenia(user_input, komendy_urządzeń)
+            if komenda_z_urz:
+                print(f"➡️ Zinterpretowano jako: {komenda_z_urz}")
+                confirm = input("Czy wykonać? [Y/n]: ").strip().lower()
+                if confirm in ["", "y", "yes", "tak"]:
+                    is_valid, reason = validator.validate_command(komenda_z_urz)
+                    if not is_valid:
+                        print(f"🛑 {reason}")
+                        continue
+                    if reason:
+                        print(f"⚠️ Ostrzeżenie: {reason}")
+                    success, output = executor.execute(komenda_z_urz)
                     print(output)
-                    history.add_entry("system", f"Wykonano: {cmd}")
+                    terminal.add_to_history(user_input, output)
                 else:
-                    print(f"❌ {output}")
-                    history.add_entry("system", f"Błąd wykonania: {cmd}")
+                    print("❌ Anulowano wykonanie.")
+                continue  # nie wysyłamy do AI, bo już zrobione
+
+            # Obsługa komend prefiksowanych "!"
+            if user_input.startswith(config.COMMAND_PREFIX):
+                command = user_input[1:]
+                valid, msg = validator.validate_command(command)
+                if not valid:
+                    print(f"🛑 Blokada bezpieczeństwa: {msg}")
+                    continue
+                if msg:
+                    print(f"⚠️ Ostrzeżenie: {msg}")
+                print(f"➡️ Uruchamiam: {command}")
+                success, output = executor.execute(command)
+                print(output)
+                terminal.add_to_history(command, output)
                 continue
 
-            # Obsługa operacji na plikach
-            if user_input.startswith('read '):
-                file_path = user_input[5:].strip()
-                content = file_ops.read_file(file_path)
-                if content is not None:
+            # Obsługa czytania plików
+            if user_input.startswith("read "):
+                path = user_input[5:].strip()
+                content = file_ops.read_file(path)
+                if content:
                     print(content)
-                    history.add_entry("system", f"Odczytano plik: {file_path}")
+                    terminal.add_to_history(f"read {path}", content[:200])
                 else:
-                    print("🛑 Nie można odczytać pliku lub brak uprawnień")
-                    history.add_entry("system", f"Błąd odczytu pliku: {file_path}")
+                    print("❌ Nie udało się odczytać pliku")
                 continue
 
-            if user_input.startswith('write '):
-                parts = user_input[6:].split(maxsplit=1)
-                if len(parts) == 2:
-                    file_path, content = parts
-                    if file_ops.write_file(file_path, content):
-                        print("✔ Zapisano plik")
-                        history.add_entry("system", f"Zapisano plik: {file_path}")
+            # Obsługa zapisu do plików
+            if user_input.startswith("write "):
+                parts = shlex.split(user_input)
+                if len(parts) >= 3:
+                    path, content = parts[1], " ".join(parts[2:])
+                    if file_ops.write_file(path, content):
+                        print("✅ Zapisano")
+                        terminal.add_to_history(f"write {path}", content)
                     else:
-                        print("🛑 Nie można zapisać pliku lub brak uprawnień")
-                        history.add_entry("system", f"Błąd zapisu pliku: {file_path}")
+                        print("❌ Błąd zapisu")
                 else:
-                    print("🛑 Nieprawidłowy format: write <plik> <treść>")
+                    print("❌ Błąd składni: write <plik> <treść>")
                 continue
 
             # Interakcja z AI
             ai_response = terminal.query_ai(user_input)
             print(ai_response)
-            history.add_entry("assistant", ai_response)
+            terminal.add_to_history(user_input, ai_response)
+
+            # Sprawdź, czy AI wygenerował komendę do wykonania lub operację na pliku
+            parse_and_execute_ai_response(ai_response, config, validator, executor, terminal)
+            handle_file_operations(ai_response, file_ops, terminal)
 
         except KeyboardInterrupt:
-            print("\nWpisz 'exit' aby zakończyć")
-            continue
+            print("\n⏹️ Przerwano – wpisz 'exit' aby zakończyć.")
         except Exception as e:
             print(f"❌ Nieoczekiwany błąd: {e}")
-            history.add_entry("system", f"Błąd systemowy: {str(e)}")
-            continue
+
 
 if __name__ == "__main__":
     main()
